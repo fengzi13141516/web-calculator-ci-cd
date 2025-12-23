@@ -14,7 +14,7 @@
 ## 如何运行
 ```bash
 # 1. 克隆项目
-git clone https://github.com/fengzi13141516/my-cicd-project.git
+git clone https://github.com/fengzi13141516/web-calculator-ci-cd
 cd my-cicd-project
 
 # 2. 安装依赖并运行
