@@ -1,0 +1,146 @@
+# GitLab CI/CD 配置文件
+stages:
+  - test
+  - build
+
+variables:
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: ""  # 禁用TLS，简化配置
+  IMAGE_NAME: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+  PYTHON_VERSION: "3.12"
+
+# 缓存pip包
+cache:
+  paths:
+    - .pip-cache/
+  key: $CI_COMMIT_REF_SLUG
+
+# 阶段1: 单元测试
+unit_tests:
+  stage: test
+  image: python:$PYTHON_VERSION
+  before_script:
+    - python --version
+    - pip install --upgrade pip
+    - pip install -r requirements.txt
+  script:
+    - echo "运行单元测试..."
+    - pytest tests/unit/ -v --cov=app --cov-report=xml --cov-report=html
+  artifacts:
+    when: always
+    paths:
+      - coverage.xml
+      - htmlcov/
+    reports:
+      junit: junit.xml
+    expire_in: 1 week
+  only:
+    - main  # 只在主分支运行
+
+# 阶段2: 功能测试（简化版 - 不使用Docker in Docker）
+functional_tests:
+  stage: test
+  image: python:$PYTHON_VERSION
+  before_script:
+    - pip install --upgrade pip
+    - pip install -r requirements.txt
+    - apt-get update && apt-get install -y curl || apk add --no-cache curl || true  # 安装curl
+  script:
+    - echo "启动应用并运行功能测试..."
+    - python app.py &
+    - sleep 3  # 等待应用启动
+    
+    # 使用引号包裹URL测试
+    - |
+      echo "测试健康检查..."
+      curl -f "http://localhost:5000/health" || exit 1
+      
+      echo "测试加法 (2 + 3)..."
+      curl -f "http://localhost:5000/add/2&3" || exit 1
+      
+      echo "测试乘法 (4 × 5)..."
+      curl -f "http://localhost:5000/multiply/4&5" || exit 1
+      
+      echo "测试无效输入..."
+      status_code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:5000/add/abc&xyz")
+      if [ "$status_code" -ne 400 ]; then
+        echo "错误: 期望400状态码，但得到 $status_code"
+        exit 1
+      fi
+      
+      echo "所有功能测试通过！"
+  after_script:
+    - pkill -f "python app.py" || true  # 清理进程
+  artifacts:
+    when: always
+    paths:
+      - functional-test-report.txt
+    expire_in: 1 week
+  only:
+    - main
+
+# 阶段3: 构建Docker镜像（使用Docker in Docker）
+build_image:
+  stage: build
+  image: docker:26
+  services:
+    - name: docker:26-dind
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  before_script:
+    - echo "设置Docker环境..."
+    - docker --version
+    - echo "登录到GitLab容器注册表..."
+    
+    # 检查是否设置了注册表凭证
+    - |
+      if [ -z "$CI_REGISTRY_PASSWORD" ]; then
+        echo "警告: CI_REGISTRY_PASSWORD 未设置，跳过镜像推送"
+        echo "如果要推送镜像，请在GitLab项目设置中添加CI_REGISTRY_USER和CI_REGISTRY_PASSWORD变量"
+      else
+        echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+      fi
+  script:
+    - echo "构建Docker镜像..."
+    - docker build -t $IMAGE_NAME .
+    
+    # 只有设置了凭证才推送镜像
+    - |
+      if [ -n "$CI_REGISTRY_PASSWORD" ]; then
+        echo "标记镜像..."
+        docker tag $IMAGE_NAME $CI_REGISTRY_IMAGE:latest
+        
+        echo "推送镜像到注册表..."
+        docker push $IMAGE_NAME
+        docker push $CI_REGISTRY_IMAGE:latest
+        
+        echo "清理本地镜像..."
+        docker rmi $IMAGE_NAME $CI_REGISTRY_IMAGE:latest || true
+      else
+        echo "跳过镜像推送（未设置注册表凭证）"
+      fi
+  after_script:
+    - echo "构建完成"
+  artifacts:
+    paths:
+      - docker-build.log
+    expire_in: 1 week
+  only:
+    - main
+
+# 阶段4: 代码质量检查（可选）
+lint:
+  stage: test
+  image: python:$PYTHON_VERSION
+  before_script:
+    - pip install pylint black
+  script:
+    - echo "检查代码格式..."
+    - black --check --diff app.py tests/ || echo "代码格式检查失败（但允许继续）"
+    - echo "运行pylint..."
+    - pylint app.py --exit-zero  # 即使有警告也继续
+  only:
+    - main
+  allow_failure: true  # 允许失败，不影响整体流水线

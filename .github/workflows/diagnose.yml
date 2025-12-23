@@ -1,0 +1,62 @@
+name: Diagnose Deployment Issues
+
+on: [workflow_dispatch]
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Environment
+        run: |
+          echo "=== GitHub Actions 环境 ==="
+          echo "Runner OS: $(uname -a)"
+          echo "Runner User: $(whoami)"
+          echo ""
+          echo "=== Secrets 检查 ==="
+          echo "DEPLOY_HOST 长度: ${#DEPLOY_HOST}"
+          echo "DEPLOY_USER 长度: ${#DEPLOY_USER}"
+          echo "DEPLOY_SSH_PRIVATE_KEY 长度: ${#DEPLOY_SSH_PRIVATE_KEY}"
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          
+      - name: Create SSH Key File
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}" > ~/.ssh/test_key
+          chmod 600 ~/.ssh/test_key
+          
+          echo "=== 私钥文件检查 ==="
+          echo "文件大小: $(wc -c < ~/.ssh/test_key) bytes"
+          echo "文件行数: $(wc -l < ~/.ssh/test_key) lines"
+          echo ""
+          echo "前3行:"
+          head -3 ~/.ssh/test_key
+          echo ""
+          echo "最后3行:"
+          tail -3 ~/.ssh/test_key
+          
+      - name: Test Connection Step by Step
+        run: |
+          echo "=== 分步连接测试 ==="
+          echo ""
+          echo "1. 测试网络连通性..."
+          timeout 5 ping -c 1 "${{ secrets.DEPLOY_HOST }}" && echo "✅ 网络可达" || echo "❌ 网络不可达"
+          
+          echo ""
+          echo "2. 测试端口 22..."
+          timeout 5 nc -z -w 2 "${{ secrets.DEPLOY_HOST }}" 22 && echo "✅ 端口 22 开放" || echo "❌ 端口 22 未开放"
+          
+          echo ""
+          echo "3. 测试 SSH 连接（简单命令）..."
+          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/test_key \
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" "echo '✅ 简单命令执行成功'" \
+            && echo "✅ SSH 连接成功" || echo "❌ SSH 连接失败"
+          
+          echo ""
+          echo "4. 测试 SSH 连接（部署目录）..."
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/test_key \
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "mkdir -p /opt/web-calculator && echo '✅ 部署目录创建成功'" \
+            && echo "✅ 服务器操作成功" || echo "❌ 服务器操作失败"
